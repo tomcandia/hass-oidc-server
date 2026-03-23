@@ -2,7 +2,7 @@
 
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import jwt
 import pytest
@@ -16,7 +16,10 @@ from custom_components.oidc_provider.http import (
     OIDCJWKSView,
     OIDCRegisterView,
 )
-from custom_components.oidc_provider.token_validator import get_issuer_from_request
+from custom_components.oidc_provider.token_validator import (
+    _get_ha_external_url,
+    get_issuer_from_request,
+)
 
 
 def test_get_base_url_with_forwarded_headers():
@@ -80,6 +83,95 @@ def test_get_base_url_with_only_host_header():
     assert result == "http://localhost:8123"
     # Should fall back to origin() when both headers aren't present
     request.url.origin.assert_called_once()
+
+
+def test_get_base_url_uses_ha_external_url():
+    """Test get_issuer_from_request uses HA external URL when no forwarded headers."""
+    request = Mock()
+    request.headers = {}
+    request.url.origin.return_value = "http://192.168.1.100:8123"
+
+    with patch(
+        "custom_components.oidc_provider.token_validator._get_ha_external_url",
+        return_value="https://my-ha.example.com",
+    ):
+        result = get_issuer_from_request(request)
+
+    assert result == "https://my-ha.example.com"
+    request.url.origin.assert_not_called()
+
+
+def test_get_base_url_strips_trailing_slash_from_external_url():
+    """Test that trailing slash is stripped from HA external URL."""
+    request = Mock()
+    request.headers = {}
+    request.url.origin.return_value = "http://192.168.1.100:8123"
+
+    with patch(
+        "custom_components.oidc_provider.token_validator._get_ha_external_url",
+        return_value="https://my-ha.example.com/",
+    ):
+        result = get_issuer_from_request(request)
+
+    assert result == "https://my-ha.example.com"
+
+
+def test_get_base_url_falls_back_to_origin_when_no_external_url():
+    """Test fallback to request origin when HA external URL is not configured."""
+    request = Mock()
+    request.headers = {}
+    request.url.origin.return_value = "http://192.168.1.100:8123"
+
+    with patch(
+        "custom_components.oidc_provider.token_validator._get_ha_external_url",
+        return_value=None,
+    ):
+        result = get_issuer_from_request(request)
+
+    assert result == "http://192.168.1.100:8123"
+    request.url.origin.assert_called_once()
+
+
+def test_get_ha_external_url_returns_none_when_no_hass():
+    """Test _get_ha_external_url returns None when hass is not in app."""
+    request = Mock()
+    request.app.get.return_value = None
+
+    assert _get_ha_external_url(request) is None
+
+
+def test_get_ha_external_url_returns_none_when_hass_is_not_ha_instance():
+    """Test _get_ha_external_url returns None when hass is not a HomeAssistant instance."""
+    request = Mock()
+    request.app.get.return_value = "not a HomeAssistant instance"
+
+    assert _get_ha_external_url(request) is None
+
+
+def test_get_ha_external_url_returns_url_from_ha(hass):
+    """Test _get_ha_external_url returns external URL from HA config."""
+    request = Mock()
+    request.app.get.return_value = hass
+
+    with patch(
+        "homeassistant.helpers.network.get_url",
+        return_value="https://my-ha.example.com",
+    ):
+        result = _get_ha_external_url(request)
+
+    assert result == "https://my-ha.example.com"
+
+
+def test_get_ha_external_url_returns_none_on_exception(hass):
+    """Test _get_ha_external_url returns None when get_url raises."""
+    request = Mock()
+    request.app.get.return_value = hass
+
+    with patch(
+        "homeassistant.helpers.network.get_url",
+        side_effect=Exception("no external url configured"),
+    ):
+        assert _get_ha_external_url(request) is None
 
 
 @pytest.mark.asyncio
