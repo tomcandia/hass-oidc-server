@@ -2,7 +2,7 @@
 
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import jwt
 import pytest
@@ -78,6 +78,59 @@ def test_get_base_url_with_only_host_header():
 
     assert result == "http://localhost:8123"
     # Should fall back to origin() when both headers aren't present
+    request.url.origin.assert_called_once()
+
+
+def test_get_base_url_uses_ha_external_url():
+    """Test get_issuer_from_request uses HA external URL when no forwarded headers."""
+    request = Mock()
+    request.headers = {}
+    request.app.get.return_value = Mock()  # mock hass
+    request.url.origin.return_value = "http://192.168.1.100:8123"
+
+    with patch(
+        "custom_components.oidc_provider.token_validator.get_url",
+        return_value="https://my-ha.example.com",
+        create=True,
+    ) as mock_get_url:
+        with patch(
+            "custom_components.oidc_provider.token_validator._get_ha_external_url",
+            return_value="https://my-ha.example.com",
+        ):
+            result = get_issuer_from_request(request)
+
+    assert result == "https://my-ha.example.com"
+    request.url.origin.assert_not_called()
+
+
+def test_get_base_url_strips_trailing_slash_from_external_url():
+    """Test that trailing slash is stripped from HA external URL."""
+    request = Mock()
+    request.headers = {}
+    request.url.origin.return_value = "http://192.168.1.100:8123"
+
+    with patch(
+        "custom_components.oidc_provider.token_validator._get_ha_external_url",
+        return_value="https://my-ha.example.com/",
+    ):
+        result = get_issuer_from_request(request)
+
+    assert result == "https://my-ha.example.com"
+
+
+def test_get_base_url_falls_back_to_origin_when_no_external_url():
+    """Test fallback to request origin when HA external URL is not configured."""
+    request = Mock()
+    request.headers = {}
+    request.url.origin.return_value = "http://192.168.1.100:8123"
+
+    with patch(
+        "custom_components.oidc_provider.token_validator._get_ha_external_url",
+        return_value=None,
+    ):
+        result = get_issuer_from_request(request)
+
+    assert result == "http://192.168.1.100:8123"
     request.url.origin.assert_called_once()
 
 
