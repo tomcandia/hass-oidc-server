@@ -9,6 +9,7 @@ import pytest
 
 from custom_components.oidc_provider.const import DOMAIN
 from custom_components.oidc_provider.http import (
+    OAuth2AuthorizationServerMetadataAlternateView,
     OAuth2AuthorizationServerMetadataView,
     OIDCContinueView,
     OIDCDiscoveryView,
@@ -206,6 +207,31 @@ async def test_oauth2_authorization_server_metadata():
     data = json.loads(body)
 
     # Verify required fields
+    assert data["issuer"] == "https://homeassistant.local"
+    assert data["authorization_endpoint"] == "https://homeassistant.local/oidc/authorize"
+    assert data["token_endpoint"] == "https://homeassistant.local/oidc/token"
+    assert data["registration_endpoint"] == "https://homeassistant.local/oidc/register"
+    assert "authorization_code" in data["grant_types_supported"]
+    assert "refresh_token" in data["grant_types_supported"]
+
+
+@pytest.mark.asyncio
+async def test_oauth2_authorization_server_metadata_alternate_path():
+    """Test OAuth 2.0 Authorization Server Metadata at alternate path."""
+    request = Mock()
+    request.headers = {}
+    request.url.origin.return_value = "https://homeassistant.local"
+
+    view = OAuth2AuthorizationServerMetadataAlternateView()
+    assert view.url == "/oidc/.well-known/oauth-authorization-server"
+
+    response = await view.get(request)
+
+    assert response.status == 200
+    body = response.body.decode("utf-8")
+    data = json.loads(body)
+
+    # Should return the same metadata as the primary endpoint
     assert data["issuer"] == "https://homeassistant.local"
     assert data["authorization_endpoint"] == "https://homeassistant.local/oidc/authorize"
     assert data["token_endpoint"] == "https://homeassistant.local/oidc/token"
