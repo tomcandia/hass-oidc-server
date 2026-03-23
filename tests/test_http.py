@@ -154,7 +154,7 @@ def test_get_ha_external_url_returns_url_from_ha(hass):
     request.app.get.return_value = hass
 
     with patch(
-        "custom_components.oidc_provider.token_validator.get_url",
+        "homeassistant.helpers.network.get_url",
         return_value="https://my-ha.example.com",
     ):
         result = _get_ha_external_url(request)
@@ -168,7 +168,7 @@ def test_get_ha_external_url_returns_none_on_exception(hass):
     request.app.get.return_value = hass
 
     with patch(
-        "custom_components.oidc_provider.token_validator.get_url",
+        "homeassistant.helpers.network.get_url",
         side_effect=Exception("no external url configured"),
     ):
         assert _get_ha_external_url(request) is None
