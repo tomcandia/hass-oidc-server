@@ -115,6 +115,7 @@ async def setup_http_endpoints(hass: HomeAssistant) -> None:
     # Register views
     hass.http.register_view(OIDCDiscoveryView())
     hass.http.register_view(OAuth2AuthorizationServerMetadataView())
+    hass.http.register_view(OAuth2AuthorizationServerMetadataAlternateView())
     hass.http.register_view(OIDCAuthorizationView())
     hass.http.register_view(OIDCContinueView())
     hass.http.register_view(OIDCTokenView())
@@ -228,6 +229,42 @@ class OAuth2AuthorizationServerMetadataView(HomeAssistantView):
 
     url = "/.well-known/oauth-authorization-server/oidc"
     name = "api:oauth:as-metadata"
+    requires_auth = False
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle OAuth 2.0 Authorization Server Metadata request."""
+        base_url = get_issuer_from_request(request)
+
+        metadata = {
+            "issuer": base_url,
+            "authorization_endpoint": f"{base_url}/oidc/authorize",
+            "token_endpoint": f"{base_url}/oidc/token",
+            "registration_endpoint": f"{base_url}/oidc/register",
+            "jwks_uri": f"{base_url}/oidc/jwks",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "token_endpoint_auth_methods_supported": [
+                "client_secret_post",
+                "client_secret_basic",
+            ],
+            "code_challenge_methods_supported": SUPPORTED_CODE_CHALLENGE_METHODS,
+            "scopes_supported": SUPPORTED_SCOPES,
+        }
+
+        return web.json_response(metadata)
+
+
+class OAuth2AuthorizationServerMetadataAlternateView(HomeAssistantView):
+    """OAuth 2.0 Authorization Server Metadata at alternate path.
+
+    Some clients append /.well-known/oauth-authorization-server to the
+    authorization server URL rather than inserting it after the authority
+    as RFC 8414 specifies. This view serves the same metadata at that
+    alternate location for compatibility.
+    """
+
+    url = "/oidc/.well-known/oauth-authorization-server"
+    name = "api:oauth:as-metadata-alt"
     requires_auth = False
 
     async def get(self, request: web.Request) -> web.Response:
