@@ -85,19 +85,13 @@ def test_get_base_url_uses_ha_external_url():
     """Test get_issuer_from_request uses HA external URL when no forwarded headers."""
     request = Mock()
     request.headers = {}
-    request.app.get.return_value = Mock()  # mock hass
     request.url.origin.return_value = "http://192.168.1.100:8123"
 
     with patch(
-        "custom_components.oidc_provider.token_validator.get_url",
+        "custom_components.oidc_provider.token_validator._get_ha_external_url",
         return_value="https://my-ha.example.com",
-        create=True,
-    ) as mock_get_url:
-        with patch(
-            "custom_components.oidc_provider.token_validator._get_ha_external_url",
-            return_value="https://my-ha.example.com",
-        ):
-            result = get_issuer_from_request(request)
+    ):
+        result = get_issuer_from_request(request)
 
     assert result == "https://my-ha.example.com"
     request.url.origin.assert_not_called()
