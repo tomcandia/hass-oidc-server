@@ -23,6 +23,13 @@ def mock_user():
     user = Mock()
     user.id = "test_user_id"
     user.name = "Test User"
+    user.is_owner = False
+
+    # Default to admin group
+    admin_group = Mock()
+    admin_group.id = "system-admin"
+    user.groups = [admin_group]
+
     return user
 
 
