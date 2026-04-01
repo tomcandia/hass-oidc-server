@@ -627,6 +627,7 @@ async def test_oidc_authorization_view_invalid_client():
         "client_id": "nonexistent",
         "redirect_uri": "https://example.com/callback",
         "response_type": "code",
+        "scope": "openid",
     }
 
     from custom_components.oidc_provider.http import OIDCAuthorizationView
@@ -659,6 +660,7 @@ async def test_oidc_authorization_view_invalid_redirect_uri():
         "client_id": "test_client",
         "redirect_uri": "https://evil.com/callback",  # Not registered
         "response_type": "code",
+        "scope": "openid",
     }
 
     from custom_components.oidc_provider.http import OIDCAuthorizationView
@@ -691,6 +693,7 @@ async def test_oidc_authorization_view_unsupported_code_challenge_method():
         "client_id": "test_client",
         "redirect_uri": "https://example.com/callback",
         "response_type": "code",
+        "scope": "openid",
         "code_challenge": "test_challenge",
         "code_challenge_method": "plain",  # Not supported
     }
@@ -1307,6 +1310,187 @@ async def test_oidc_token_view_valid_pkce():
 
 
 @pytest.mark.asyncio
+async def test_oidc_token_view_includes_groups_in_access_token():
+    """Test token endpoint includes groups claim in JWT when groups scope is requested."""
+    import base64
+    import hashlib
+
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from custom_components.oidc_provider.security import hash_client_secret
+
+    code_verifier = "valid_verifier_1234567890_abcdefghijklmnop"
+    verifier_hash = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(verifier_hash).decode("ascii").rstrip("=")
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    public_key = private_key.public_key()
+
+    mock_user = Mock()
+    mock_user.id = "user123"
+    mock_user.name = "Test User"
+    mock_user.is_owner = True
+    admin_group = Mock()
+    admin_group.id = "system-admin"
+    mock_user.groups = [admin_group]
+
+    mock_auth = Mock()
+    mock_auth.async_get_user = AsyncMock(return_value=mock_user)
+
+    mock_token_store = Mock()
+    mock_token_store.async_save = AsyncMock()
+
+    hass = Mock()
+    hass.auth = mock_auth
+    hass.data = {
+        DOMAIN: {
+            "clients": {
+                "test_client": {
+                    "client_secret_hash": hash_client_secret("test_secret"),
+                }
+            },
+            "authorization_codes": {
+                "valid_code": {
+                    "client_id": "test_client",
+                    "redirect_uri": "https://example.com/callback",
+                    "user_id": "user123",
+                    "scope": "openid groups",
+                    "expires_at": time.time() + 600,
+                    "code_challenge": code_challenge,
+                    "code_challenge_method": "S256",
+                }
+            },
+            "refresh_tokens": {},
+            "rate_limit_attempts": {},
+            "jwt_private_key": private_key,
+            "jwt_kid": "test-kid-1",
+            "token_store": mock_token_store,
+        }
+    }
+
+    request = MagicMock()
+    request.app = {"hass": hass}
+    request.remote = "127.0.0.1"
+    request.headers = {}
+    request.post = AsyncMock(
+        return_value={
+            "grant_type": "authorization_code",
+            "client_id": "test_client",
+            "client_secret": "test_secret",
+            "code": "valid_code",
+            "redirect_uri": "https://example.com/callback",
+            "code_verifier": code_verifier,
+        }
+    )
+
+    from custom_components.oidc_provider.http import OIDCTokenView
+
+    view = OIDCTokenView()
+    response = await view.post(request)
+
+    assert response.status == 200
+    data = json.loads(response.body.decode("utf-8"))
+
+    # Decode the access token and verify groups claim
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    token_payload = jwt.decode(
+        data["access_token"], public_pem, algorithms=["RS256"], options={"verify_aud": False}
+    )
+    assert token_payload["groups"] == ["owner", "admin"]
+
+
+@pytest.mark.asyncio
+async def test_oidc_token_view_excludes_groups_without_scope():
+    """Test token endpoint does not include groups claim when groups scope is not requested."""
+    import base64
+    import hashlib
+
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from custom_components.oidc_provider.security import hash_client_secret
+
+    code_verifier = "valid_verifier_1234567890_abcdefghijklmnop"
+    verifier_hash = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(verifier_hash).decode("ascii").rstrip("=")
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    public_key = private_key.public_key()
+
+    mock_token_store = Mock()
+    mock_token_store.async_save = AsyncMock()
+
+    hass = Mock()
+    hass.data = {
+        DOMAIN: {
+            "clients": {
+                "test_client": {
+                    "client_secret_hash": hash_client_secret("test_secret"),
+                }
+            },
+            "authorization_codes": {
+                "valid_code": {
+                    "client_id": "test_client",
+                    "redirect_uri": "https://example.com/callback",
+                    "user_id": "user123",
+                    "scope": "openid profile",
+                    "expires_at": time.time() + 600,
+                    "code_challenge": code_challenge,
+                    "code_challenge_method": "S256",
+                }
+            },
+            "refresh_tokens": {},
+            "rate_limit_attempts": {},
+            "jwt_private_key": private_key,
+            "jwt_kid": "test-kid-1",
+            "token_store": mock_token_store,
+        }
+    }
+
+    request = MagicMock()
+    request.app = {"hass": hass}
+    request.remote = "127.0.0.1"
+    request.headers = {}
+    request.post = AsyncMock(
+        return_value={
+            "grant_type": "authorization_code",
+            "client_id": "test_client",
+            "client_secret": "test_secret",
+            "code": "valid_code",
+            "redirect_uri": "https://example.com/callback",
+            "code_verifier": code_verifier,
+        }
+    )
+
+    from custom_components.oidc_provider.http import OIDCTokenView
+
+    view = OIDCTokenView()
+    response = await view.post(request)
+
+    assert response.status == 200
+    data = json.loads(response.body.decode("utf-8"))
+
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    token_payload = jwt.decode(
+        data["access_token"], public_pem, algorithms=["RS256"], options={"verify_aud": False}
+    )
+    assert "groups" not in token_payload
+
+
+@pytest.mark.asyncio
 async def test_oidc_token_view_refresh_token():
     """Test token endpoint with refresh token grant."""
     from cryptography.hazmat.backends import default_backend
@@ -1491,15 +1675,14 @@ async def test_oidc_userinfo_endpoint():
     )
     public_key = private_key.public_key()
 
-    # Create a valid token
+    # Create a valid token with profile and email scopes
     payload = {
         "sub": "user123",
-        "name": "Test User",
-        "email": "test@example.com",
         "iat": int(time.time()),
         "exp": int(time.time()) + 3600,
         "iss": "http://localhost",
-        "aud": "test_client",  # Required audience
+        "aud": "test_client",
+        "scope": "openid profile email",
     }
 
     private_key_pem = private_key.private_bytes(
@@ -1514,6 +1697,10 @@ async def test_oidc_userinfo_endpoint():
     mock_user = Mock()
     mock_user.id = "user123"
     mock_user.name = "Test User"
+    mock_user.is_owner = False
+    admin_group = Mock()
+    admin_group.id = "system-admin"
+    mock_user.groups = [admin_group]
 
     # Mock hass.auth
     mock_auth = Mock()
@@ -1548,7 +1735,489 @@ async def test_oidc_userinfo_endpoint():
     data = json.loads(body)
     assert data["sub"] == "user123"
     assert data["name"] == "Test User"
-    assert data["email"] == "user123"  # HA uses user.id as email fallback
+    assert "email" not in data  # "Test User" doesn't look like an email
+    assert "groups" not in data
+
+
+@pytest.mark.asyncio
+async def test_oidc_userinfo_includes_groups_when_scope_requested():
+    """Test UserInfo endpoint includes groups when groups scope is requested."""
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    # Generate RSA keys
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    public_key = private_key.public_key()
+
+    # Create a valid token with groups scope
+    payload = {
+        "sub": "user123",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+        "iss": "http://localhost",
+        "aud": "test_client",
+        "scope": "openid profile groups",
+    }
+
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    token = jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+    # Mock admin user
+    mock_user = Mock()
+    mock_user.id = "user123"
+    mock_user.name = "Test User"
+    mock_user.is_owner = False
+    admin_group = Mock()
+    admin_group.id = "system-admin"
+    mock_user.groups = [admin_group]
+
+    mock_auth = Mock()
+    mock_auth.async_get_user = AsyncMock(return_value=mock_user)
+
+    hass = Mock()
+    hass.auth = mock_auth
+    hass.data = {
+        DOMAIN: {
+            "jwt_public_key": public_key,
+            "jwt_kid": "test-kid-1",
+            "clients": {"test_client": {}},
+        }
+    }
+
+    mock_url = Mock()
+    mock_url.origin.return_value = "http://localhost"
+
+    request = Mock()
+    request.app = {"hass": hass}
+    request.headers = {"Authorization": f"Bearer {token}"}
+    request.url = mock_url
+
+    from custom_components.oidc_provider.http import OIDCUserInfoView
+
+    view = OIDCUserInfoView()
+    response = await view.get(request)
+
+    assert response.status == 200
+    data = json.loads(response.body.decode("utf-8"))
+    assert data["groups"] == ["admin"]
+
+
+@pytest.mark.asyncio
+async def test_oidc_userinfo_groups_for_owner():
+    """Test UserInfo endpoint includes owner in groups for owner users."""
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    public_key = private_key.public_key()
+
+    payload = {
+        "sub": "owner123",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+        "iss": "http://localhost",
+        "aud": "test_client",
+        "scope": "openid groups",
+    }
+
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    token = jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+    # Mock owner user (owner is also in admin group)
+    mock_user = Mock()
+    mock_user.id = "owner123"
+    mock_user.name = "Owner User"
+    mock_user.is_owner = True
+    admin_group = Mock()
+    admin_group.id = "system-admin"
+    mock_user.groups = [admin_group]
+
+    mock_auth = Mock()
+    mock_auth.async_get_user = AsyncMock(return_value=mock_user)
+
+    hass = Mock()
+    hass.auth = mock_auth
+    hass.data = {
+        DOMAIN: {
+            "jwt_public_key": public_key,
+            "jwt_kid": "test-kid-1",
+            "clients": {"test_client": {}},
+        }
+    }
+
+    mock_url = Mock()
+    mock_url.origin.return_value = "http://localhost"
+
+    request = Mock()
+    request.app = {"hass": hass}
+    request.headers = {"Authorization": f"Bearer {token}"}
+    request.url = mock_url
+
+    from custom_components.oidc_provider.http import OIDCUserInfoView
+
+    view = OIDCUserInfoView()
+    response = await view.get(request)
+
+    assert response.status == 200
+    data = json.loads(response.body.decode("utf-8"))
+    assert data["groups"] == ["owner", "admin"]
+
+
+@pytest.mark.asyncio
+async def test_oidc_userinfo_groups_for_regular_user():
+    """Test UserInfo endpoint returns correct groups for regular user."""
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    public_key = private_key.public_key()
+
+    payload = {
+        "sub": "regular123",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+        "iss": "http://localhost",
+        "aud": "test_client",
+        "scope": "openid groups",
+    }
+
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    token = jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+    mock_user = Mock()
+    mock_user.id = "regular123"
+    mock_user.name = "Regular User"
+    mock_user.is_owner = False
+    user_group = Mock()
+    user_group.id = "system-users"
+    mock_user.groups = [user_group]
+
+    mock_auth = Mock()
+    mock_auth.async_get_user = AsyncMock(return_value=mock_user)
+
+    hass = Mock()
+    hass.auth = mock_auth
+    hass.data = {
+        DOMAIN: {
+            "jwt_public_key": public_key,
+            "jwt_kid": "test-kid-1",
+            "clients": {"test_client": {}},
+        }
+    }
+
+    mock_url = Mock()
+    mock_url.origin.return_value = "http://localhost"
+
+    request = Mock()
+    request.app = {"hass": hass}
+    request.headers = {"Authorization": f"Bearer {token}"}
+    request.url = mock_url
+
+    from custom_components.oidc_provider.http import OIDCUserInfoView
+
+    view = OIDCUserInfoView()
+    response = await view.get(request)
+
+    assert response.status == 200
+    data = json.loads(response.body.decode("utf-8"))
+    assert data["groups"] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_oidc_userinfo_groups_for_read_only_user():
+    """Test UserInfo endpoint returns correct groups for read-only user."""
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    public_key = private_key.public_key()
+
+    payload = {
+        "sub": "readonly123",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+        "iss": "http://localhost",
+        "aud": "test_client",
+        "scope": "openid groups",
+    }
+
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    token = jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+    mock_user = Mock()
+    mock_user.id = "readonly123"
+    mock_user.name = "Read Only User"
+    mock_user.is_owner = False
+    ro_group = Mock()
+    ro_group.id = "system-read-only"
+    mock_user.groups = [ro_group]
+
+    mock_auth = Mock()
+    mock_auth.async_get_user = AsyncMock(return_value=mock_user)
+
+    hass = Mock()
+    hass.auth = mock_auth
+    hass.data = {
+        DOMAIN: {
+            "jwt_public_key": public_key,
+            "jwt_kid": "test-kid-1",
+            "clients": {"test_client": {}},
+        }
+    }
+
+    mock_url = Mock()
+    mock_url.origin.return_value = "http://localhost"
+
+    request = Mock()
+    request.app = {"hass": hass}
+    request.headers = {"Authorization": f"Bearer {token}"}
+    request.url = mock_url
+
+    from custom_components.oidc_provider.http import OIDCUserInfoView
+
+    view = OIDCUserInfoView()
+    response = await view.get(request)
+
+    assert response.status == 200
+    data = json.loads(response.body.decode("utf-8"))
+    assert data["groups"] == ["read-only"]
+
+
+@pytest.mark.asyncio
+async def test_oidc_userinfo_only_returns_sub_without_scopes():
+    """Test UserInfo endpoint only returns sub when no optional scopes requested."""
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    public_key = private_key.public_key()
+
+    payload = {
+        "sub": "user123",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+        "iss": "http://localhost",
+        "aud": "test_client",
+        "scope": "openid",
+    }
+
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    token = jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+    mock_user = Mock()
+    mock_user.id = "user123"
+    mock_user.name = "Test User"
+    mock_user.is_owner = False
+    admin_group = Mock()
+    admin_group.id = "system-admin"
+    mock_user.groups = [admin_group]
+
+    mock_auth = Mock()
+    mock_auth.async_get_user = AsyncMock(return_value=mock_user)
+
+    hass = Mock()
+    hass.auth = mock_auth
+    hass.data = {
+        DOMAIN: {
+            "jwt_public_key": public_key,
+            "jwt_kid": "test-kid-1",
+            "clients": {"test_client": {}},
+        }
+    }
+
+    mock_url = Mock()
+    mock_url.origin.return_value = "http://localhost"
+
+    request = Mock()
+    request.app = {"hass": hass}
+    request.headers = {"Authorization": f"Bearer {token}"}
+    request.url = mock_url
+
+    from custom_components.oidc_provider.http import OIDCUserInfoView
+
+    view = OIDCUserInfoView()
+    response = await view.get(request)
+
+    assert response.status == 200
+    data = json.loads(response.body.decode("utf-8"))
+    assert data["sub"] == "user123"
+    assert "name" not in data
+    assert "email" not in data
+    assert "groups" not in data
+
+
+@pytest.mark.asyncio
+async def test_oidc_userinfo_returns_email_when_username_is_email():
+    """Test UserInfo endpoint returns email when username looks like an email address."""
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(
+        public_exponent=65537, key_size=2048, backend=default_backend()
+    )
+    public_key = private_key.public_key()
+
+    payload = {
+        "sub": "user123",
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 3600,
+        "iss": "http://localhost",
+        "aud": "test_client",
+        "scope": "openid email",
+    }
+
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    token = jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+    mock_user = Mock()
+    mock_user.id = "user123"
+    mock_user.name = "john@example.com"
+    mock_user.is_owner = False
+    mock_user.groups = []
+
+    mock_auth = Mock()
+    mock_auth.async_get_user = AsyncMock(return_value=mock_user)
+
+    hass = Mock()
+    hass.auth = mock_auth
+    hass.data = {
+        DOMAIN: {
+            "jwt_public_key": public_key,
+            "jwt_kid": "test-kid-1",
+            "clients": {"test_client": {}},
+        }
+    }
+
+    mock_url = Mock()
+    mock_url.origin.return_value = "http://localhost"
+
+    request = Mock()
+    request.app = {"hass": hass}
+    request.headers = {"Authorization": f"Bearer {token}"}
+    request.url = mock_url
+
+    from custom_components.oidc_provider.http import OIDCUserInfoView
+
+    view = OIDCUserInfoView()
+    response = await view.get(request)
+
+    assert response.status == 200
+    data = json.loads(response.body.decode("utf-8"))
+    assert data["email"] == "john@example.com"
+    assert data["email_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_oidc_authorize_rejects_missing_openid_scope():
+    """Test authorization endpoint rejects requests without openid scope."""
+    hass = Mock()
+    hass.data = {
+        DOMAIN: {
+            "clients": {
+                "test_client": {
+                    "redirect_uris": ["https://example.com/callback"],
+                }
+            },
+            "pending_auth_requests": {},
+            "require_pkce": False,
+        }
+    }
+
+    request = Mock()
+    request.app = {"hass": hass}
+    request.query = {
+        "client_id": "test_client",
+        "redirect_uri": "https://example.com/callback",
+        "response_type": "code",
+        "scope": "profile",
+    }
+
+    from custom_components.oidc_provider.http import OIDCAuthorizationView
+
+    view = OIDCAuthorizationView()
+    response = await view.get(request)
+
+    assert response.status == 400
+    assert b"openid scope is required" in response.body
+
+
+@pytest.mark.asyncio
+async def test_oidc_authorize_rejects_empty_scope():
+    """Test authorization endpoint rejects requests with empty scope."""
+    hass = Mock()
+    hass.data = {
+        DOMAIN: {
+            "clients": {
+                "test_client": {
+                    "redirect_uris": ["https://example.com/callback"],
+                }
+            },
+            "pending_auth_requests": {},
+            "require_pkce": False,
+        }
+    }
+
+    request = Mock()
+    request.app = {"hass": hass}
+    request.query = {
+        "client_id": "test_client",
+        "redirect_uri": "https://example.com/callback",
+        "response_type": "code",
+    }
+
+    from custom_components.oidc_provider.http import OIDCAuthorizationView
+
+    view = OIDCAuthorizationView()
+    response = await view.get(request)
+
+    assert response.status == 400
+    assert b"openid scope is required" in response.body
 
 
 @pytest.mark.asyncio
